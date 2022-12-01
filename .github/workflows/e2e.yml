@@ -1,15 +1,17 @@
 name: E2E
 
 on:
-  workflow_run:
-    workflows: ["Go Unit Test"]
-    types: [completed]
+  push:
+    branches: [ master ]
+  pull_request:
+    types: [assigned, opened, synchronize, reopened]
+  release:
+    types: [ released ]
     
 jobs:
 
   E2E:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
 
     - name: Check out code
