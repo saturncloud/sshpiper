@@ -2,12 +2,13 @@ package libplugin
 
 import (
 	"bufio"
-	context "context"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
 
+	"github.com/tg123/remotesigner/grpcsigner"
 	"github.com/tg123/sshpiper/libplugin/ioconn"
 	"google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -20,6 +21,8 @@ type ConnMetadata interface {
 	RemoteAddr() string
 
 	UniqueID() string
+
+	GetMeta(key string) string
 }
 
 func (c *ConnMeta) User() string {
@@ -32,6 +35,10 @@ func (c *ConnMeta) RemoteAddr() string {
 
 func (c *ConnMeta) UniqueID() string {
 	return c.UniqId
+}
+
+func (c *ConnMeta) GetMeta(key string) string {
+	return c.Metadata[key]
 }
 
 type KeyboardInteractiveChallenge func(user, instruction string, question string, echo bool) (answer string, err error)
@@ -54,6 +61,14 @@ type SshPiperPluginConfig struct {
 	BannerCallback func(conn ConnMetadata) string
 
 	VerifyHostKeyCallback func(conn ConnMetadata, hostname, netaddr string, key []byte) error
+
+	PipeCreateErrorCallback func(remoteAddr string, err error)
+
+	PipeStartCallback func(conn ConnMetadata)
+
+	PipeErrorCallback func(conn ConnMetadata, err error)
+
+	GrpcRemoteSignerFactory grpcsigner.SignerFactory
 }
 
 type SshPiperPlugin interface {
@@ -92,6 +107,14 @@ func NewFromGrpc(config SshPiperPluginConfig, grpc *grpc.Server, listener net.Li
 	}()
 
 	RegisterSshPiperPluginServer(s.grpc, s)
+
+	if config.GrpcRemoteSignerFactory != nil {
+		gs, err := grpcsigner.NewSignerServer(config.GrpcRemoteSignerFactory)
+		if err != nil {
+			return nil, err
+		}
+		grpcsigner.RegisterSignerServer(s.grpc, gs)
+	}
 
 	return s, nil
 }
@@ -178,6 +201,18 @@ func (s *server) ListCallbacks(ctx context.Context, req *ListCallbackRequest) (*
 
 	if s.config.VerifyHostKeyCallback != nil {
 		cb = append(cb, "VerifyHostKey")
+	}
+
+	if s.config.PipeStartCallback != nil {
+		cb = append(cb, "PipeStart")
+	}
+
+	if s.config.PipeErrorCallback != nil {
+		cb = append(cb, "PipeError")
+	}
+
+	if s.config.PipeCreateErrorCallback != nil {
+		cb = append(cb, "PipeCreateError")
 	}
 
 	return &ListCallbackResponse{
@@ -360,7 +395,7 @@ func (s *server) UpstreamAuthFailureNotice(ctx context.Context, req *UpstreamAut
 		methods = append(methods, m)
 	}
 
-	s.config.UpstreamAuthFailureCallback(req.Meta, req.Method, fmt.Errorf(req.Error), methods)
+	s.config.UpstreamAuthFailureCallback(req.Meta, req.Method, fmt.Errorf("%v", req.Error), methods)
 
 	return &UpstreamAuthFailureNoticeResponse{}, nil
 }
@@ -377,7 +412,7 @@ func (s *server) Banner(ctx context.Context, req *BannerRequest) (*BannerRespons
 	}, nil
 }
 
-func (s *server) VerifyHostKey(ctx context.Context, req *VerifyHostKeyRequest) (*VerifyHostKeyReply, error) {
+func (s *server) VerifyHostKey(ctx context.Context, req *VerifyHostKeyRequest) (*VerifyHostKeyResponse, error) {
 	if s.config.VerifyHostKeyCallback == nil {
 		return nil, status.Errorf(codes.Unimplemented, "method VerifyHostKey not implemented")
 	}
@@ -387,7 +422,37 @@ func (s *server) VerifyHostKey(ctx context.Context, req *VerifyHostKeyRequest) (
 		return nil, err
 	}
 
-	return &VerifyHostKeyReply{
+	return &VerifyHostKeyResponse{
 		Verified: true,
 	}, nil
+}
+
+func (s *server) PipeStartNotice(ctx context.Context, req *PipeStartNoticeRequest) (*PipeStartNoticeResponse, error) {
+	if s.config.PipeStartCallback == nil {
+		return nil, status.Errorf(codes.Unimplemented, "method PipeStartNotice not implemented")
+	}
+
+	s.config.PipeStartCallback(req.Meta)
+
+	return &PipeStartNoticeResponse{}, nil
+}
+
+func (s *server) PipeErrorNotice(ctx context.Context, req *PipeErrorNoticeRequest) (*PipeErrorNoticeResponse, error) {
+	if s.config.PipeErrorCallback == nil {
+		return nil, status.Errorf(codes.Unimplemented, "method PipeErrorNotice not implemented")
+	}
+
+	s.config.PipeErrorCallback(req.Meta, fmt.Errorf("%v", req.Error))
+
+	return &PipeErrorNoticeResponse{}, nil
+}
+
+func (s *server) PipeCreateErrorNotice(ctx context.Context, req *PipeCreateErrorNoticeRequest) (*PipeCreateErrorNoticeResponse, error) {
+	if s.config.PipeCreateErrorCallback == nil {
+		return nil, status.Errorf(codes.Unimplemented, "method PipeCreateErrorNotice not implemented")
+	}
+
+	s.config.PipeCreateErrorCallback(req.FromAddr, fmt.Errorf("%v", req.Error))
+
+	return &PipeCreateErrorNoticeResponse{}, nil
 }

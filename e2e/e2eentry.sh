@@ -1,7 +1,8 @@
 #!/bin/bash
+set -x
 
-# use entrypoint.sh to generate the ssh_host_rsa_key
-PLUGIN="dummy_badname/" bash /sshpiperd/entrypoint.sh 2>/dev/null
+groupadd -f testgroup && \
+useradd -m -G testgroup testgroupuser
 
 if [ "${SSHPIPERD_DEBUG}" == "1" ]; then
     echo "enter debug on hold mode"

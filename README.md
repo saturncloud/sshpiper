@@ -1,6 +1,6 @@
 # sshpiper 🖇
 
-![Go](https://github.com/tg123/sshpiper/workflows/Go/badge.svg)
+[![E2E](https://github.com/tg123/sshpiper/actions/workflows/e2e.yml/badge.svg)](https://github.com/tg123/sshpiper/actions/workflows/e2e.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/tg123/sshpiper)](https://goreportcard.com/report/github.com/tg123/sshpiper)
 [![Docker Image](https://img.shields.io/docker/pulls/farmer1992/sshpiperd.svg)](https://hub.docker.com/r/farmer1992/sshpiperd)
 
@@ -10,10 +10,11 @@
 
 ### Overview and Terminology
 
- * `downstream`: the client side, typicall ssh client 
- * `upstream`: the server side, typicall sshd server
- * `plugin`: handles the routing from `downstream` to `upstream`. the `plugin` are also repsonsible for the mapping authentication methods to upstream. for exmaple, the downstream may use password as authentication method, but the upstream may receive public key authentication mapped by `sshpiper`.
- * `addtional chanllenge`: some `plugin` will not do routing but add an additional challenges to ssh authentication to `upstream`. for example, the `downstream` may be asked for two factor authentication provided by the `plugin`.
+ * `downstream`: the client side, typically an ssh client.
+ * `upstream`: the server side, typically an ssh server.
+ * `plugin`: handles the routing from `downstream` to `upstream`. The `plugin` is also responsible for mapping authentication methods to the upstream server. For example, the downstream may use password authentication, but the upstream server may receive public key authentication mapped by `sshpiper`.
+ * `additional challenge`: some `plugins` will not only perform routing but also add additional challenges to SSH authentication for the `upstream` server. For example, the `downstream` may be asked for two-factor authentication provided by the `plugin`.
+
 
 ```
 +---------+                      +------------------+          +-----------------+
@@ -43,7 +44,7 @@ cd sshpiper
 git submodule update --init --recursive
 
 mkdir out
-go build -o out ./...
+go build -tags full -o out ./...
 ```
 
 ## Run simple demo
@@ -54,10 +55,10 @@ go build -o out ./...
 docker run -d -e USER_NAME=user -e USER_PASSWORD=pass -e PASSWORD_ACCESS=true -p 127.0.0.1:5522:2222 lscr.io/linuxserver/openssh-server
 ```
 
-### start `sshpiperd` with `fixed` plugin targetting the dummy sshd server
+### start `sshpiperd` with `fixed` plugin targeting the dummy sshd server
 
 ```
-sudo ./out/sshpiperd ./out/fixed --target 127.0.0.1:5522
+./out/sshpiperd -i /tmp/sshpiperkey --server-key-generate-mode notexist --log-level=trace ./out/fixed --target 127.0.0.1:5522
 ```
 
 ### test ssh connection (password: `pass`)
@@ -71,7 +72,7 @@ ssh 127.0.0.1 -l user -p 2222
 Here illustrates the example of `addional challenge` before the `fixed` plugin.
 
 ```
-sudo ./out/sshpiperd --log-level=trace ./out/simplemath -- ./out/fixed --target 127.0.0.1:5522
+./out/sshpiperd -i /tmp/sshpiperkey --server-key-generate-mode notexist --log-level=trace ./out/simplemath -- ./out/fixed --target 127.0.0.1:5522
 ```
 
 ## Plugins
@@ -84,21 +85,43 @@ sudo ./out/sshpiperd --log-level=trace ./out/simplemath -- ./out/fixed --target 
 Plugin list
 
  * [workingdir](plugin/workingdir/) 🔀: `/home`-like directory to managed upstreams routing by sshpiped.
- * [workingdirbykey](plugin/workingdirbykey/) 🔀: same as `workingdir` but uses public key to route.
  * [yaml](plugin/yaml/) 🔀: config routing with a single yaml file.
  * [docker](plugin/docker/) 🔀: pipe into docker containers.
  * [kubernetes](plugin/kubernetes/) 🔀: manage pipes via Kubernetes CRD.
- * [totp](plugin/totp/) 🔒: TOTP 2FA plugin. compatible with all [RFC6238](https://datatracker.ietf.org/doc/html/rfc6238) authenticator, for example: `google authenticator`, `azure authenticator`.
- * [azdevicecode](plugin/azdevicecode/) 🔒: ask user to enter [azure device code](https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-device-code) before login
- * [fixed](plugin/fixed/) 🔀: fixed targetting the dummy sshd server
+ * [azdevicecode](https://github.com/tg123/sshpiper-plugins/tree/main/azdevicecode) 🔒: ask user to enter [azure device code](https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-device-code) before login
+ * [fixed](plugin/fixed/) 🔀: fixed targeting the dummy sshd server
+ * [username-router](plugin/username-router/) 🔀: route based on username, the username format is `target+username`, where `target` is the target host and `username` is the username to use for that target.
  * [simplemath](plugin/simplemath/) 🔒: ask for very simple math question before login, demo purpose
-
+ * [githubapp](https://github.com/tg123/sshpiper-gh) 🔀: login ssh with your github account
+ * [restful](https://github.com/11notes/docker-sshpiper) by [@11notes](https://github.com/11notes) 🔀🔒: The rest plugin for sshpiperd is a simple plugin that allows you to use a restful backend for authentication and challenge.
+ * [failtoban](plugin/failtoban/) 🔒: ban ip after failed login attempts
+ * [openpubkey](https://github.com/tg123/sshpiper-openpubkey)🔀🔒: integrate with [openpubkey](https://github.com/openpubkey/openpubkey)
 
 ## Screening recording
 
-`sshpiperd` support recording the screen in `typescript` format (not the lang). The format is compatible with [scriptreplay(1)](https://linux.die.net/man/1/scriptreplay)
+### asciicast
 
-To use it, start sshpiperd with `--typescript-log-dir loggingdir`
+recording the screen in `asciicast` format <https://docs.asciinema.org/manual/asciicast/v2/>
+
+To use it, start sshpiperd with `--screen-recording-format asciicast` and `--screen-recording-dir /path/to/recordingdir`
+
+    Example:
+
+    ```
+    ssh user_name@
+    ... do some commands
+    exit
+
+    asciinema play /path/to/recordingdir/<conn_guid>/shell-channel-0.cast
+
+    ```
+
+### typescript
+
+recording the screen in `typescript` format (not the lang). The format is compatible with [scriptreplay(1)](https://linux.die.net/man/1/scriptreplay)
+
+
+To use it, start sshpiperd with `--screen-recording-format typescript` and `--screen-recording-dir /path/to/recordingdir`
 
     Example:
 
@@ -108,7 +131,7 @@ To use it, start sshpiperd with `--typescript-log-dir loggingdir`
     exit
 
 
-    $ cd loggingdir/user_name
+    $ cd /path/to/recordingdir/<conn_guid>
     $ ls *.timing *.typescript
     1472847798.timing 1472847798.typescript
 
@@ -141,12 +164,16 @@ How this work
                       |      |                 |                       
                       |      |                 |     +----------------+
                       |      v                 |     |                |
-                      |   sign agian           |     |   server       |
+                      |   sign again           |     |   server       |
                       |   using PK_Y  +-------------->   check PK_Y   |
                       |                        |     |                |
                       |                        |     |                |
                       +------------------------+     +----------------+
-```                      
+```
+
+## Ports to other platforms
+
+ * [sshpiper on OpenWrt](https://github.com/ihidchaos/sshpiper-openwrt) by [@ihidchaos](https://github.com/ihidchaos)
 
 ## Migrating from `v0`
 

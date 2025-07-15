@@ -3,8 +3,8 @@
 package versioned
 
 import (
-	"fmt"
-	"net/http"
+	fmt "fmt"
+	http "net/http"
 
 	sshpiperv1beta1 "github.com/tg123/sshpiper/plugin/kubernetes/generated/clientset/versioned/typed/sshpiper/v1beta1"
 	discovery "k8s.io/client-go/discovery"
@@ -17,8 +17,7 @@ type Interface interface {
 	SshpiperV1beta1() sshpiperv1beta1.SshpiperV1beta1Interface
 }
 
-// Clientset contains the clients for groups. Each group has exactly one
-// version included in a Clientset.
+// Clientset contains the clients for groups.
 type Clientset struct {
 	*discovery.DiscoveryClient
 	sshpiperV1beta1 *sshpiperv1beta1.SshpiperV1beta1Client
