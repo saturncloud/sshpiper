@@ -23,21 +23,29 @@ git submodule update --init --recursive
 
 ### Start Develop Environment
 
+ _Note_: in vscode, you can use Reopen in dev container to start the develop environment.
+
 ```
 # in e2e folder, run:
-SSHPIPERD_DEBUG=1 docker-compose up --force-recreate
+SSHPIPERD_DEBUG=1 docker-compose up --force-recreate --build -d
 ```
 
 you will have two sshd:
 
- * `host-password`: a password only sshd server (user: `user`, password: `pass`)
- * `host-publickey`: a public key only sshd server (put your public key in `/sshconfig_publickey/.config/authorized_keys`)
+ * `host-password:2222`: a password only sshd server (user: `user`, password: `pass`)
+ * `host-publickey:2222`: a public key only sshd server (put your public key in `/publickey_authorized_keys/authorized_keys`)
 
 more settings: <https://github.com/linuxserver/docker-openssh-server>
 
 ### Make some direct changes to source code
 
-after you have done, in e2e folder run:
+after you have done, attach to testrunner container:
+
+```
+docker exec -ti e2e_testrunner_1 bash
+```
+
+then run test in `/src/e2e`
 
 ```
 go test
@@ -96,7 +104,7 @@ The `upstream` object contains host port and auth info about how to connect to t
 simple build it with:
 
 ```
-go build
+go build -tags full
 ```
 
 you will get the executable in the current directory. say `myplugin`. start it with:

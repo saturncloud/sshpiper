@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -10,7 +11,7 @@ import (
 )
 
 type ChainPlugins struct {
-	pluginsCallback []*ssh.PiperConfig
+	pluginsCallback []*GrpcPluginConfig
 	plugins         []*GrpcPlugin
 }
 
@@ -30,6 +31,16 @@ func (cp *ChainPlugins) Append(p *GrpcPlugin) error {
 func (cp *ChainPlugins) onNextPlugin(challengeCtx ssh.ChallengeContext, upstream *libplugin.UpstreamNextPluginAuth) error {
 	chain := challengeCtx.(*chainConnMeta)
 
+	if upstream.Meta != nil {
+		if chain.Metadata == nil {
+			chain.Metadata = make(map[string]string)
+		}
+
+		for k, v := range upstream.Meta {
+			chain.Metadata[k] = v
+		}
+	}
+
 	if chain.current+1 >= len(cp.pluginsCallback) {
 		return fmt.Errorf("no more plugins")
 	}
@@ -39,26 +50,27 @@ func (cp *ChainPlugins) onNextPlugin(challengeCtx ssh.ChallengeContext, upstream
 }
 
 type chainConnMeta struct {
-	connMeta
+	PluginConnMeta
 	current int
 }
 
-func (cp *ChainPlugins) CreateChallengeContext(conn ssh.ConnMetadata) (ssh.ChallengeContext, error) {
+func (cp *ChainPlugins) CreateChallengeContext(conn ssh.ServerPreAuthConn) (ssh.ChallengeContext, error) {
 	uiq, err := uuid.NewRandom()
 	if err != nil {
 		return nil, err
 	}
 
 	meta := chainConnMeta{
-		connMeta: connMeta{
+		PluginConnMeta: PluginConnMeta{
 			UserName: conn.User(),
 			FromAddr: conn.RemoteAddr().String(),
 			UniqId:   uiq.String(),
+			Metadata: make(map[string]string),
 		},
 	}
 
 	for _, p := range cp.plugins {
-		if err := p.NewConnection(&meta.connMeta); err != nil {
+		if err := p.NewConnection(&meta.PluginConnMeta); err != nil {
 			return nil, err
 		}
 	}
@@ -96,9 +108,9 @@ func (cp *ChainPlugins) NextAuthMethods(conn ssh.ConnMetadata, challengeCtx ssh.
 	return methods, nil
 }
 
-func (cp *ChainPlugins) InstallPiperConfig(config *ssh.PiperConfig) error {
+func (cp *ChainPlugins) InstallPiperConfig(config *GrpcPluginConfig) error {
 
-	config.CreateChallengeContext = func(conn ssh.ConnMetadata) (ssh.ChallengeContext, error) {
+	config.CreateChallengeContext = func(conn ssh.ServerPreAuthConn) (ssh.ChallengeContext, error) {
 		ctx, err := cp.CreateChallengeContext(conn)
 		if err != nil {
 			log.Errorf("cannot create challenge context %v", err)
@@ -125,19 +137,44 @@ func (cp *ChainPlugins) InstallPiperConfig(config *ssh.PiperConfig) error {
 	}
 
 	config.UpstreamAuthFailureCallback = func(conn ssh.ConnMetadata, method string, err error, challengeCtx ssh.ChallengeContext) {
-		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
-		if cur.UpstreamAuthFailureCallback != nil {
-			cur.UpstreamAuthFailureCallback(conn, method, err, challengeCtx)
+		for _, p := range cp.pluginsCallback {
+			if p.UpstreamAuthFailureCallback != nil {
+				p.UpstreamAuthFailureCallback(conn, method, err, challengeCtx)
+			}
 		}
 	}
 
-	config.BannerCallback = func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) string {
+	config.DownstreamBannerCallback = func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) string {
 		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
-		if cur.BannerCallback != nil {
-			return cur.BannerCallback(conn, challengeCtx)
+		if cur.DownstreamBannerCallback != nil {
+			return cur.DownstreamBannerCallback(conn, challengeCtx)
 		}
 
 		return ""
+	}
+
+	config.PipeStartCallback = func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) {
+		for _, p := range cp.pluginsCallback {
+			if p.PipeStartCallback != nil {
+				p.PipeStartCallback(conn, challengeCtx)
+			}
+		}
+	}
+
+	config.PipeErrorCallback = func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext, err error) {
+		for _, p := range cp.pluginsCallback {
+			if p.PipeErrorCallback != nil {
+				p.PipeErrorCallback(conn, challengeCtx, err)
+			}
+		}
+	}
+
+	config.PipeCreateErrorCallback = func(conn net.Conn, err error) {
+		for _, p := range cp.pluginsCallback {
+			if p.PipeCreateErrorCallback != nil {
+				p.PipeCreateErrorCallback(conn, err)
+			}
+		}
 	}
 
 	return nil

@@ -37,7 +37,7 @@ func AuthMethodFromName(n string) AuthMethod {
 	return -1
 }
 
-func ConfigStdioLogrus(p SshPiperPlugin, logger *logrus.Logger) {
+func ConfigStdioLogrus(p SshPiperPlugin, formatter logrus.Formatter, logger *logrus.Logger) {
 	if logger == nil {
 		logger = logrus.StandardLogger()
 	}
@@ -47,8 +47,14 @@ func ConfigStdioLogrus(p SshPiperPlugin, logger *logrus.Logger) {
 		lv, _ := logrus.ParseLevel(level)
 		logger.SetLevel(lv)
 
+		if formatter != nil {
+			logger.SetFormatter(formatter)
+		}
+
 		if tty {
-			logger.SetFormatter(&logrus.TextFormatter{ForceColors: true})
+			if formatter == nil {
+				logger.SetFormatter(&logrus.TextFormatter{ForceColors: true})
+			}
 		}
 	})
 }
@@ -59,11 +65,12 @@ func SplitHostPortForSSH(addr string) (host string, port int, err error) {
 	h, p, err := net.SplitHostPort(host)
 	if err == nil {
 		host = h
-		port, err = strconv.Atoi(p)
-
+		var parsedPort int64
+		parsedPort, err = strconv.ParseInt(p, 10, 32)
 		if err != nil {
 			return
 		}
+		port = int(parsedPort)
 	} else if host != "" {
 		// test valid after concat :22
 		if _, _, err = net.SplitHostPort(host + ":22"); err == nil {
@@ -80,7 +87,6 @@ func SplitHostPortForSSH(addr string) (host string, port int, err error) {
 
 // DialForSSH is the modified version of net.Dial, would add ":22" automaticlly
 func DialForSSH(addr string) (net.Conn, error) {
-
 	if _, _, err := net.SplitHostPort(addr); err != nil && addr != "" {
 		// test valid after concat :22
 		if _, _, err := net.SplitHostPort(addr + ":22"); err == nil {
@@ -109,10 +115,15 @@ func CreatePasswordAuthFromString(password string) *Upstream_Password {
 	}
 }
 
-func CreatePrivateKeyAuth(key []byte) *Upstream_PrivateKey {
+func CreatePrivateKeyAuth(key []byte, optionalSignedCaPublicKey ...[]byte) *Upstream_PrivateKey {
+	var caPublicKey []byte
+	if len(optionalSignedCaPublicKey) > 0 {
+		caPublicKey = optionalSignedCaPublicKey[0]
+	}
 	return &Upstream_PrivateKey{
 		PrivateKey: &UpstreamPrivateKeyAuth{
-			PrivateKey: key,
+			PrivateKey:  key,
+			CaPublicKey: caPublicKey,
 		},
 	}
 }
@@ -128,6 +139,14 @@ func CreateRemoteSignerAuth(meta string) *Upstream_RemoteSigner {
 func CreateNextPluginAuth(meta map[string]string) *Upstream_NextPlugin {
 	return &Upstream_NextPlugin{
 		NextPlugin: &UpstreamNextPluginAuth{
+			Meta: meta,
+		},
+	}
+}
+
+func CreateRetryCurrentPluginAuth(meta map[string]string) *Upstream_RetryCurrentPlugin {
+	return &Upstream_RetryCurrentPlugin{
+		RetryCurrentPlugin: &UpstreamRetryCurrentPluginAuth{
 			Meta: meta,
 		},
 	}
