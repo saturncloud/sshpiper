@@ -2,10 +2,10 @@ package plugin
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/google/uuid"
-	log "github.com/sirupsen/logrus"
 	"github.com/tg123/sshpiper/libplugin"
 	"golang.org/x/crypto/ssh"
 )
@@ -62,10 +62,12 @@ func (cp *ChainPlugins) CreateChallengeContext(conn ssh.ServerPreAuthConn) (ssh.
 
 	meta := chainConnMeta{
 		PluginConnMeta: PluginConnMeta{
-			UserName: conn.User(),
-			FromAddr: conn.RemoteAddr().String(),
-			UniqId:   uiq.String(),
-			Metadata: make(map[string]string),
+			ConnMeta: libplugin.ConnMeta{
+				UserName: conn.User(),
+				FromAddr: conn.RemoteAddr().String(),
+				UniqId:   uiq.String(),
+				Metadata: make(map[string]string),
+			},
 		},
 	}
 
@@ -104,16 +106,15 @@ func (cp *ChainPlugins) NextAuthMethods(conn ssh.ConnMetadata, challengeCtx ssh.
 		methods = append(methods, "keyboard-interactive")
 	}
 
-	log.Debugf("next auth methods %v", methods)
+	slog.Debug("next auth methods", "methods", methods)
 	return methods, nil
 }
 
 func (cp *ChainPlugins) InstallPiperConfig(config *GrpcPluginConfig) error {
-
 	config.CreateChallengeContext = func(conn ssh.ServerPreAuthConn) (ssh.ChallengeContext, error) {
 		ctx, err := cp.CreateChallengeContext(conn)
 		if err != nil {
-			log.Errorf("cannot create challenge context %v", err)
+			slog.Error("cannot create challenge context", "error", err)
 		}
 		return ctx, err
 	}
@@ -121,19 +122,35 @@ func (cp *ChainPlugins) InstallPiperConfig(config *GrpcPluginConfig) error {
 	config.NextAuthMethods = cp.NextAuthMethods
 
 	config.NoClientAuthCallback = func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
-		return cp.pluginsCallback[challengeCtx.(*chainConnMeta).current].NoClientAuthCallback(conn, challengeCtx)
+		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
+		if cur.NoClientAuthCallback == nil {
+			return nil, fmt.Errorf("none auth callback is not implemented")
+		}
+		return cur.NoClientAuthCallback(conn, challengeCtx)
 	}
 
 	config.PasswordCallback = func(conn ssh.ConnMetadata, password []byte, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
-		return cp.pluginsCallback[challengeCtx.(*chainConnMeta).current].PasswordCallback(conn, password, challengeCtx)
+		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
+		if cur.PasswordCallback == nil {
+			return nil, fmt.Errorf("password auth callback is not implemented")
+		}
+		return cur.PasswordCallback(conn, password, challengeCtx)
 	}
 
 	config.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
-		return cp.pluginsCallback[challengeCtx.(*chainConnMeta).current].PublicKeyCallback(conn, key, challengeCtx)
+		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
+		if cur.PublicKeyCallback == nil {
+			return nil, fmt.Errorf("publickey auth callback is not implemented")
+		}
+		return cur.PublicKeyCallback(conn, key, challengeCtx)
 	}
 
 	config.KeyboardInteractiveCallback = func(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
-		return cp.pluginsCallback[challengeCtx.(*chainConnMeta).current].KeyboardInteractiveCallback(conn, client, challengeCtx)
+		cur := cp.pluginsCallback[challengeCtx.(*chainConnMeta).current]
+		if cur.KeyboardInteractiveCallback == nil {
+			return nil, fmt.Errorf("keyboard-interactive auth callback is not implemented")
+		}
+		return cur.KeyboardInteractiveCallback(conn, client, challengeCtx)
 	}
 
 	config.UpstreamAuthFailureCallback = func(conn ssh.ConnMetadata, method string, err error, challengeCtx ssh.ChallengeContext) {

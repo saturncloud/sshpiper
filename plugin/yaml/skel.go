@@ -4,11 +4,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
 	"os/user"
 	"regexp"
 	"slices"
-
-	log "github.com/sirupsen/logrus"
 
 	"github.com/tg123/sshpiper/libplugin"
 	"github.com/tg123/sshpiper/libplugin/skel"
@@ -78,15 +78,25 @@ func (s *skelpipeToWrapper) Host(conn libplugin.ConnMetadata) string {
 	return s.to.Host
 }
 
-func (s *skelpipeToWrapper) IgnoreHostKey(conn libplugin.ConnMetadata) bool {
-	return s.to.IgnoreHostkey
-}
-
 func (s *skelpipeToWrapper) KnownHosts(conn libplugin.ConnMetadata) ([]byte, error) {
-	return s.config.loadFileOrDecodeMany(s.to.KnownHosts, s.to.KnownHostsData, map[string]string{
+	configured := s.to.KnownHosts.Configured() || s.to.KnownHostsData.Configured()
+
+	data, err := s.config.loadFileOrDecodeMany(s.to.KnownHosts, s.to.KnownHostsData, map[string]string{
 		"DOWNSTREAM_USER": conn.User(),
 		"UPSTREAM_USER":   s.username,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// known_hosts was configured but resolved to no data (e.g. missing file).
+	// Treat this as a hard failure instead of silently falling back to
+	// disabling upstream host key verification.
+	if configured && len(data) == 0 {
+		return nil, fmt.Errorf("known_hosts is configured for upstream user %q but resolved to no data", s.username)
+	}
+
+	return data, nil
 }
 
 func (s *skelpipeFromWrapper) MatchConn(conn libplugin.ConnMetadata) (skel.SkelPipeTo, error) {
@@ -117,7 +127,7 @@ func (s *skelpipeFromWrapper) MatchConn(conn libplugin.ConnMetadata) (skel.SkelP
 			if errors.As(err, &unknownUser) {
 				return nil, nil
 			}
-			log.Errorf("[ERROR] Matchconn(): Failure looking up user %q: %T - %v", username, err, err)
+			slog.Error("Matchconn failure looking up user", "username", username, "error_type", fmt.Sprintf("%T", err), "error", err)
 			return nil, err
 		}
 		userGroups, err := getUserGroups(usr)
@@ -212,7 +222,7 @@ func (p *plugin) listPipe(_ libplugin.ConnMetadata) ([]skel.SkelPipe, error) {
 func getUserGroups(usr *user.User) ([]string, error) {
 	groupIds, err := usr.GroupIds()
 	if err != nil {
-		log.Errorf("[ERROR] getUserGroups(): Failure retrieving group IDs for %q: %T - %v", usr.Username, err, err)
+		slog.Error("getUserGroups failure retrieving group IDs", "username", usr.Username, "error_type", fmt.Sprintf("%T", err), "error", err)
 		return nil, err
 	}
 
@@ -220,7 +230,7 @@ func getUserGroups(usr *user.User) ([]string, error) {
 	for _, groupId := range groupIds {
 		grp, err := user.LookupGroupId(groupId)
 		if err != nil {
-			log.Errorf("[ERROR] getUserGroups(): Failure retrieving group name for %q: %T - %v", usr.Username, err, err)
+			slog.Error("getUserGroups failure retrieving group name", "username", usr.Username, "error_type", fmt.Sprintf("%T", err), "error", err)
 			return nil, err
 		}
 		groups = append(groups, grp.Name)
