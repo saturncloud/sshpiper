@@ -18,7 +18,6 @@ func TestDocker(t *testing.T) {
 		piperport,
 		"/sshpiperd/plugins/docker",
 	)
-
 	if err != nil {
 		t.Errorf("failed to run sshpiperd: %v", err)
 	}
@@ -29,7 +28,7 @@ func TestDocker(t *testing.T) {
 
 	t.Run("password", func(t *testing.T) {
 		randtext := uuid.New().String()
-		targetfie := uuid.New().String()
+		targetfile := uuid.New().String()
 
 		c, stdin, stdout, err := runCmd(
 			"ssh",
@@ -43,9 +42,8 @@ func TestDocker(t *testing.T) {
 			"-l",
 			"pass",
 			"127.0.0.1",
-			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfie),
+			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfile),
 		)
-
 		if err != nil {
 			t.Errorf("failed to ssh to piper-fixed, %v", err)
 		}
@@ -56,11 +54,10 @@ func TestDocker(t *testing.T) {
 
 		time.Sleep(time.Second) // wait for file flush
 
-		checkSharedFileContent(t, targetfie, randtext)
+		checkSharedFileContent(t, targetfile, randtext)
 	})
 
 	t.Run("key", func(t *testing.T) {
-
 		keyfiledir, err := os.MkdirTemp("", "")
 		if err != nil {
 			t.Errorf("failed to create temp key file: %v", err)
@@ -68,16 +65,16 @@ func TestDocker(t *testing.T) {
 
 		keyfile := path.Join(keyfiledir, "key")
 
-		if err := os.WriteFile(keyfile, []byte(testprivatekey), 0400); err != nil {
+		if err := os.WriteFile(keyfile, []byte(testprivatekey), 0o400); err != nil {
 			t.Errorf("failed to write to test key: %v", err)
 		}
 
-		if err := os.WriteFile("/publickey_authorized_keys/authorized_keys", []byte(`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINRGTH325rDUp12tplwukHmR8ytbC9TPZ886gCstynP1`), 0400); err != nil {
+		if err := os.WriteFile(authorizedKeysPath, []byte(testpublickey+"\n"), 0o400); err != nil {
 			t.Errorf("failed to write to authorized_keys: %v", err)
 		}
 
 		randtext := uuid.New().String()
-		targetfie := uuid.New().String()
+		targetfile := uuid.New().String()
 
 		c, _, _, err := runCmd(
 			"ssh",
@@ -93,9 +90,8 @@ func TestDocker(t *testing.T) {
 			"-i",
 			keyfile,
 			"127.0.0.1",
-			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfie),
+			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfile),
 		)
-
 		if err != nil {
 			t.Errorf("failed to ssh to piper-fixed, %v", err)
 		}
@@ -104,6 +100,51 @@ func TestDocker(t *testing.T) {
 
 		time.Sleep(time.Second) // wait for file flush
 
-		checkSharedFileContent(t, targetfie, randtext)
+		checkSharedFileContent(t, targetfile, randtext)
+	})
+
+	t.Run("key_no_sshd", func(t *testing.T) {
+		keyfiledir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Errorf("failed to create temp key file: %v", err)
+		}
+
+		keyfile := path.Join(keyfiledir, "key")
+
+		if err := os.WriteFile(keyfile, []byte(testprivatekey), 0o400); err != nil {
+			t.Errorf("failed to write to test key: %v", err)
+		}
+
+		randtext := uuid.New().String()
+		targetfile := uuid.New().String()
+
+		c, stdin, _, err := runCmd(
+			"ssh",
+			"-v",
+			"-o",
+			"StrictHostKeyChecking=no",
+			"-o",
+			"UserKnownHostsFile=/dev/null",
+			"-p",
+			piperport,
+			"-l",
+			"nosshd",
+			"-i",
+			keyfile,
+			"127.0.0.1",
+		)
+		if err != nil {
+			t.Errorf("failed to ssh to piper-fixed, %v", err)
+		}
+
+		if _, err := fmt.Fprintf(stdin, "echo -n %v > /shared/%v\nexit\n", randtext, targetfile); err != nil {
+			t.Errorf("failed to send command to ssh stdin: %v", err)
+		}
+
+		if err := c.Wait(); err != nil {
+			t.Errorf("ssh command failed: %v", err)
+		}
+
+		checkSharedFileContent(t, targetfile, randtext)
 	})
 }

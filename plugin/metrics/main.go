@@ -1,12 +1,14 @@
+//go:build full || e2e
+
 package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	log "github.com/sirupsen/logrus"
 	"github.com/tg123/sshpiper/libplugin"
 	"github.com/urfave/cli/v2"
 )
@@ -53,10 +55,10 @@ func main() {
 			)
 			go func(metrics *prometheusMetrics, bindAddress string) {
 				if err := metrics.ListenAndServe(bindAddress); err != nil {
-					log.Error("Metrics server error:", err)
+					slog.Error("metrics server error", "error", err)
 				}
 			}(metrics, bindAddress)
-			log.Info("Metrics server is listening on: ", bindAddress)
+			slog.Info("metrics server is listening", "bind_address", bindAddress)
 			return config, nil
 		},
 	})
@@ -137,7 +139,7 @@ func (ms *prometheusMetrics) ListenAndServe(addr string) error {
 func (ms *prometheusMetrics) pipeStartCallback(conn libplugin.ConnMetadata) {
 	gauge, err := ms.openConnections.GetMetricWithLabelValues(conn.RemoteAddr(), conn.User())
 	if err != nil {
-		log.Error("Failed to fetch gauge for pipe start callback: ", err)
+		slog.Error("failed to fetch gauge for pipe start callback", "error", err)
 		return
 	}
 	gauge.Inc()
@@ -150,7 +152,7 @@ func (ms *prometheusMetrics) pipeErrorCallback(conn libplugin.ConnMetadata, _ er
 func (ms *prometheusMetrics) pipeCreateErrorCallback(remoteAddr string, _ error) {
 	counter, err := ms.pipeCreateErrors.GetMetricWithLabelValues(remoteAddr)
 	if err != nil {
-		log.Error("Failed to get counter for pipe create error callback: ", err)
+		slog.Error("failed to get counter for pipe create error callback", "error", err)
 		return
 	}
 	counter.Inc()
@@ -159,7 +161,7 @@ func (ms *prometheusMetrics) pipeCreateErrorCallback(remoteAddr string, _ error)
 func (ms *prometheusMetrics) upstreamAuthFailureCallback(conn libplugin.ConnMetadata, method string, _ error, _ []string) {
 	counter, err := ms.upstreamAuthFailures.GetMetricWithLabelValues(conn.RemoteAddr(), conn.User(), method)
 	if err != nil {
-		log.Error("Failed to get counter for upstream auth failure callback: ", err)
+		slog.Error("failed to get counter for upstream auth failure callback", "error", err)
 		return
 	}
 	counter.Inc()
@@ -168,5 +170,5 @@ func (ms *prometheusMetrics) upstreamAuthFailureCallback(conn libplugin.ConnMeta
 type errorLogger struct{}
 
 func (l errorLogger) Println(v ...any) {
-	log.Error(v...)
+	slog.Error("prometheus handler error", "details", fmt.Sprintln(v...))
 }
