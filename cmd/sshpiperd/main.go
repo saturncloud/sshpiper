@@ -1,25 +1,59 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/pires/go-proxyproto"
-	log "github.com/sirupsen/logrus"
+	"github.com/tg123/sshpiper/cmd/internal/slogutil"
+	"github.com/tg123/sshpiper/cmd/sshpiperd/internal/admin"
 	"github.com/tg123/sshpiper/cmd/sshpiperd/internal/plugin"
 	"github.com/urfave/cli/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
+
+// loadAdminTLSConfig builds the *tls.Config for the admin gRPC listener.
+// When caCert is non-empty, mutual TLS is enforced and the supplied CA is
+// used to verify presented client certificates.
+func loadAdminTLSConfig(certFile, keyFile, caCert string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server keypair: %w", err)
+	}
+	cfg := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}
+	if caCert != "" {
+		ca, err := os.ReadFile(caCert)
+		if err != nil {
+			return nil, fmt.Errorf("read client CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, fmt.Errorf("invalid client CA in %s", caCert)
+		}
+		cfg.ClientCAs = pool
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return cfg, nil
+}
 
 var mainver string = "(devel)"
 
 func version() string {
-
-	var v = mainver
+	v := mainver
 
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -57,7 +91,8 @@ func createCmdPlugin(args []string) (*plugin.CmdPlugin, error) {
 	cmd.Args = args
 	setPdeathsig(cmd)
 
-	log.Info("starting child process plugin: ", cmd.Args)
+	slog.Info("starting child process plugin", "exe", exe, "argCount", len(cmd.Args))
+	slog.Debug("child process plugin args", "args", cmd.Args)
 
 	p, err := plugin.DialCmd(cmd)
 	if err != nil {
@@ -79,7 +114,6 @@ func isValidLogFormat(logFormat string) bool {
 }
 
 func main() {
-
 	app := &cli.App{
 		Name:        "sshpiperd",
 		Usage:       "the missing reverse proxy for ssh scp",
@@ -114,6 +148,16 @@ func main() {
 				EnvVars: []string{"SSHPIPERD_SERVER_KEY_DATA"},
 			},
 			&cli.StringFlag{
+				Name:    "server-cert",
+				Usage:   "server certificate files, support wildcard, matched to keys by fingerprint",
+				EnvVars: []string{"SSHPIPERD_SERVER_CERT"},
+			},
+			&cli.StringFlag{
+				Name:    "server-cert-data",
+				Usage:   "server certificate in base64 format, server-cert will be ignored if set",
+				EnvVars: []string{"SSHPIPERD_SERVER_CERT_DATA"},
+			},
+			&cli.StringFlag{
 				Name:    "server-key-generate-mode",
 				Usage:   "server key generate mode, one of: disable, notexist, always. generated key will be written to `server-key` if notexist or always",
 				Value:   "disable",
@@ -128,7 +172,7 @@ func main() {
 			&cli.StringFlag{
 				Name:    "log-level",
 				Value:   "info",
-				Usage:   "log level, one of: trace, debug, info, warn, error, fatal, panic",
+				Usage:   "log level, one of: debug, info, warn, error",
 				EnvVars: []string{"SSHPIPERD_LOG_LEVEL"},
 			},
 			&cli.StringFlag{
@@ -185,11 +229,29 @@ func main() {
 				Usage:   "reply to ping@openssh instead of passing it to upstream, this is useful for old sshd which doesn't support ping@openssh",
 				EnvVars: []string{"SSHPIPERD_REPLY_PING"},
 			},
+			&cli.BoolFlag{
+				Name:    "disable-local-forwarding",
+				Value:   false,
+				Usage:   "reject local and dynamic port forwarding requests from downstream clients (ssh -L and ssh -D)",
+				EnvVars: []string{"SSHPIPERD_DISABLE_LOCAL_FORWARDING"},
+			},
+			&cli.BoolFlag{
+				Name:    "disable-remote-forwarding",
+				Value:   false,
+				Usage:   "reject remote port forwarding requests from downstream clients (ssh -R)",
+				EnvVars: []string{"SSHPIPERD_DISABLE_REMOTE_FORWARDING"},
+			},
 			&cli.StringSliceFlag{
 				Name:    "allowed-proxy-addresses",
 				Value:   cli.NewStringSlice(),
 				Usage:   "allowed proxy addresses, only connections from these ip ranges are allowed to send a proxy header based on the PROXY protocol, empty will disable the PROXY protocol support",
 				EnvVars: []string{"SSHPIPERD_ALLOWED_PROXY_ADDRESSES"},
+			},
+			&cli.StringSliceFlag{
+				Name:    "inject-env",
+				Value:   cli.NewStringSlice(),
+				Usage:   "extra KEY=VALUE pairs to inject as SSH env channel-requests into every upstream session (repeatable, comma-separated also accepted via the env var); merged with plugin-provided Upstream.env (plugin wins on key collisions). The upstream sshd must list each key in AcceptEnv.",
+				EnvVars: []string{"SSHPIPERD_INJECT_ENV"},
 			},
 			&cli.DurationFlag{
 				Name:    "proxy-read-header-timeout",
@@ -221,26 +283,68 @@ func main() {
 				Usage:   "allowed public key algorithms for downstream connections, empty will allow default algorithms",
 				EnvVars: []string{"SSHPIPERD_ALLOWED_DOWNSTREAM_PUBKEY_ALGOS"},
 			},
+			&cli.StringFlag{
+				Name:    "admin-grpc-address",
+				Value:   "127.0.0.1",
+				Usage:   "listening address for the admin gRPC API (used by sshpiperd-webadmin); ignored unless --admin-grpc-port is non-zero",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_ADDRESS"},
+			},
+			&cli.IntFlag{
+				Name:    "admin-grpc-port",
+				Value:   0,
+				Usage:   "listening port for the admin gRPC API. When 0 (the default) the admin API is disabled",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_PORT"},
+			},
+			&cli.StringFlag{
+				Name:    "admin-grpc-id",
+				Value:   "",
+				Usage:   "stable identifier reported by the admin gRPC ServerInfo RPC; defaults to hostname/ssh-listen-address",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_ID"},
+			},
+			&cli.BoolFlag{
+				Name:    "admin-grpc-insecure",
+				Value:   false,
+				Usage:   "disable TLS on the admin gRPC API. Only safe on a trusted local network or behind a reverse proxy. When false (the default), --admin-grpc-tls-cert and --admin-grpc-tls-key are required",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_INSECURE"},
+			},
+			&cli.StringFlag{
+				Name:    "admin-grpc-tls-cert",
+				Value:   "",
+				Usage:   "server certificate (PEM) for the admin gRPC API; required unless --admin-grpc-insecure",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_TLS_CERT"},
+			},
+			&cli.StringFlag{
+				Name:    "admin-grpc-tls-key",
+				Value:   "",
+				Usage:   "server private key (PEM) for the admin gRPC API; required unless --admin-grpc-insecure",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_TLS_KEY"},
+			},
+			&cli.StringFlag{
+				Name:    "admin-grpc-tls-cacert",
+				Value:   "",
+				Usage:   "CA certificate (PEM) used to verify admin gRPC clients. When set, mutual TLS is required and clients must present a certificate signed by this CA",
+				EnvVars: []string{"SSHPIPERD_ADMIN_GRPC_TLS_CACERT"},
+			},
 		},
 		Action: func(ctx *cli.Context) error {
-			level, err := log.ParseLevel(ctx.String("log-level"))
+			level, err := slogutil.ParseLevel(ctx.String("log-level"))
 			if err != nil {
-				return err
+				slog.Warn("unknown log level, falling back to info", "logLevel", ctx.String("log-level"), "error", err)
 			}
-
-			log.SetLevel(level)
 
 			logFormat := ctx.String("log-format")
 			if !isValidLogFormat(logFormat) {
 				return fmt.Errorf("not a valid log-format: %v", logFormat)
 			}
+			handlerOptions := &slog.HandlerOptions{Level: level}
 			if logFormat == "json" {
-				log.SetFormatter(&log.JSONFormatter{})
+				slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, handlerOptions)))
+			} else {
+				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, handlerOptions)))
 			}
 
-			log.Info("starting sshpiperd version: ", version())
+			slog.Info("starting sshpiperd", "version", version())
 			d, err := newDaemon(ctx)
-
 			if err != nil {
 				return err
 			}
@@ -250,14 +354,14 @@ func main() {
 			allowedproxyaddresses := ctx.StringSlice("allowed-proxy-addresses")
 
 			if len(allowedproxyaddresses) > 0 {
-				proxypolicy, err := proxyproto.LaxWhiteListPolicy(allowedproxyaddresses)
+				proxypolicy, err := proxyproto.ConnLaxWhiteListPolicy(allowedproxyaddresses)
 				if err != nil {
 					return err
 				}
 
 				d.lis = &proxyproto.Listener{
 					Listener:          d.lis,
-					Policy:            proxypolicy,
+					ConnPolicy:        proxypolicy,
 					ReadHeaderTimeout: ctx.Duration("proxy-read-header-timeout"),
 				}
 			}
@@ -288,7 +392,7 @@ func main() {
 						if dir == "" {
 							continue
 						}
-						
+
 						pluginexe := filepath.Join(dir, pluginEnv)
 						if _, err := os.Stat(pluginexe); err == nil {
 							args = append(args, pluginexe)
@@ -319,7 +423,7 @@ func main() {
 
 				switch args[0] {
 				case "grpc":
-					log.Info("starting net grpc plugin: ")
+					slog.Info("starting net grpc plugin")
 
 					grpcplugin, err := createNetGrpcPlugin(args)
 					if err != nil {
@@ -342,8 +446,8 @@ func main() {
 				}
 
 				go func() {
-					if err := p.RecvLogs(log.StandardLogger().Out); err != nil {
-						log.Errorf("plugin %v recv logs error: %v", p.Name, err)
+					if err := p.RecvLogs(os.Stderr, level.String()); err != nil {
+						slog.Error("plugin recv logs error", "plugin", p.Name, "error", err)
 					}
 				}()
 
@@ -359,9 +463,68 @@ func main() {
 			d.usernameAsRecorddir = ctx.Bool("username-as-recorddir")
 			d.filterHostkeysReqeust = ctx.Bool("drop-hostkeys-message")
 			d.replyPing = ctx.Bool("reply-ping")
+			d.disableLocalForward = ctx.Bool("disable-local-forwarding")
+			d.disableRemoteForward = ctx.Bool("disable-remote-forwarding")
+
+			if raw := ctx.StringSlice("inject-env"); len(raw) > 0 {
+				d.injectEnv = make(map[string]string, len(raw))
+				for _, kv := range raw {
+					k, v, ok := strings.Cut(kv, "=")
+					if !ok || k == "" {
+						return fmt.Errorf("invalid --inject-env %q: expected KEY=VALUE", kv)
+					}
+					d.injectEnv[k] = v
+				}
+			}
 
 			if d.recordfmt != "typescript" && d.recordfmt != "asciicast" {
 				return fmt.Errorf("invalid screen recording format: %v", d.recordfmt)
+			}
+
+			if adminPort := ctx.Int("admin-grpc-port"); adminPort > 0 {
+				adminAddr := net.JoinHostPort(ctx.String("admin-grpc-address"), fmt.Sprintf("%d", adminPort))
+				adminLis, err := net.Listen("tcp", adminAddr)
+				if err != nil {
+					return fmt.Errorf("failed to listen for admin gRPC on %s: %w", adminAddr, err)
+				}
+
+				adminInsecure := ctx.Bool("admin-grpc-insecure")
+				adminCert := ctx.String("admin-grpc-tls-cert")
+				adminKey := ctx.String("admin-grpc-tls-key")
+				adminCACert := ctx.String("admin-grpc-tls-cacert")
+
+				var grpcOpts []grpc.ServerOption
+				switch {
+				case adminInsecure:
+					if adminCert != "" || adminKey != "" || adminCACert != "" {
+						return fmt.Errorf("--admin-grpc-insecure cannot be combined with --admin-grpc-tls-cert/--admin-grpc-tls-key/--admin-grpc-tls-cacert")
+					}
+					slog.Warn("admin gRPC API is running WITHOUT TLS (--admin-grpc-insecure); only safe on a trusted network", "address", adminAddr)
+				default:
+					if adminCert == "" || adminKey == "" {
+						return fmt.Errorf("admin gRPC API requires --admin-grpc-tls-cert and --admin-grpc-tls-key (or pass --admin-grpc-insecure to disable TLS)")
+					}
+					tlsConfig, err := loadAdminTLSConfig(adminCert, adminKey, adminCACert)
+					if err != nil {
+						return fmt.Errorf("failed to load admin gRPC TLS config: %w", err)
+					}
+					grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+					if adminCACert != "" {
+						slog.Info("admin gRPC API will require client certificates (mTLS)", "cacert", adminCACert)
+					}
+				}
+
+				d.adminRegistry = admin.NewRegistry()
+				adminSrv := admin.NewServer(d.adminRegistry, ctx.String("admin-grpc-id"), version(), d.lis.Addr().String())
+				grpcSrv := grpc.NewServer(grpcOpts...)
+				adminSrv.Register(grpcSrv)
+				slog.Info("admin gRPC API listening", "address", adminLis.Addr().String())
+
+				go func() {
+					if err := grpcSrv.Serve(adminLis); err != nil {
+						quit <- fmt.Errorf("admin gRPC server stopped: %w", err)
+					}
+				}()
 			}
 
 			go func() {
@@ -373,6 +536,7 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		slog.Error("run failed", "error", err)
+		os.Exit(1)
 	}
 }
