@@ -6,7 +6,8 @@ COPY cmd/sshpiperd-webadmin/internal/httpapi/web/ ./
 RUN npm run build
 
 
-FROM docker.io/golang:1.26-bookworm AS builder
+# Go >= 1.26.10 / 1.27.3 for CVE-2026-111943 (crypto/x509 distrusts the compromised eMudhra intermediates).
+FROM docker.io/golang:1.26.10-bookworm AS builder
 ARG VER=devel
 ARG BUILDTAGS
 ARG EXTERNAL=0
