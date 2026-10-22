@@ -13,7 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +30,8 @@ AAAEDcQgdh2z2r/6blq0ziJ1l6s6IAX8C+9QHfAH931cHNO9RGTH325rDUp12tplwukHmR
 `
 
 const testpublickey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINRGTH325rDUp12tplwukHmR8ytbC9TPZ886gCstynP1`
+
+const authorizedKeysPath = "/publickey_authorized_keys/authorized_keys"
 
 const waitTimeout = time.Second * 10
 
@@ -55,25 +57,51 @@ func waitForEndpointReadyWithTimeout(addr string, timeout time.Duration) {
 	}
 }
 
+// syncBuffer is a goroutine-safe bytes.Buffer. runCmd's background io.Copy
+// writes into it while test goroutines read it (via Read or Bytes), so every
+// access must be guarded.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Read(p)
+}
+
+func (b *syncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
 func runCmd(cmd string, args ...string) (*exec.Cmd, io.Writer, io.Reader, error) {
 	newargs := append([]string{cmd}, args...)
 	newargs = append([]string{"-i0", "-o0", "-e0"}, newargs...)
 	c := exec.Command("stdbuf", newargs...)
-	c.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	c.SysProcAttr = sigtermForPdeathsig
 	f, err := pty.Start(c)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	var buf bytes.Buffer
-	r := io.TeeReader(f, &buf)
+	buf := &syncBuffer{}
+	r := io.TeeReader(f, buf)
 	go func() {
 		_, _ = io.Copy(os.Stdout, r)
 	}()
 
 	log.Printf("starting %v", c.Args)
 
-	return c, f, &buf, nil
+	return c, f, buf, nil
 }
 
 func runCmdAndWait(cmd string, args ...string) error {
@@ -140,7 +168,6 @@ func killCmd(c *exec.Cmd) {
 
 func runAndGetStdout(cmd string, args ...string) ([]byte, error) {
 	c, _, stdout, err := runCmd(cmd, args...)
-
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +179,7 @@ func runAndGetStdout(cmd string, args ...string) ([]byte, error) {
 	return io.ReadAll(stdout)
 }
 
-func nextAvaliablePort() int {
+func nextAvailablePort() int {
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		log.Panic(err)
@@ -162,12 +189,11 @@ func nextAvaliablePort() int {
 }
 
 func nextAvailablePiperAddress() (string, string) {
-	port := strconv.Itoa(nextAvaliablePort())
+	port := strconv.Itoa(nextAvailablePort())
 	return net.JoinHostPort("127.0.0.1", (port)), port
 }
 
 func TestMain(m *testing.M) {
-
 	if os.Getenv("SSHPIPERD_E2E_TEST") != "1" {
 		log.Printf("skipping e2e test")
 		os.Exit(0)
