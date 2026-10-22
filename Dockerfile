@@ -9,7 +9,9 @@ RUN npm run build
 # Go >= 1.26.10 / 1.27.3 for CVE-2026-111943 (crypto/x509 distrusts the compromised eMudhra intermediates).
 FROM docker.io/golang:1.26.10-bookworm AS builder
 ARG VER=devel
-ARG BUILDTAGS
+# Saturn: build the `full` plugin set by default; charts/ssh-proxy chains the metrics plugin,
+# which upstream gates behind the `full` build tag since v1.5.2.
+ARG BUILDTAGS=full
 ARG EXTERNAL=0
 ENV CGO_ENABLED=0
 WORKDIR /src
