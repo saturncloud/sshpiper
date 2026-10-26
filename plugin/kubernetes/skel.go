@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"log/slog"
 	"os"
 	"regexp"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/tg123/go-htpasswd"
 	"github.com/tg123/sshpiper/libplugin"
 	"github.com/tg123/sshpiper/libplugin/skel"
@@ -40,9 +40,12 @@ type skelpipePublicKeyWrapper struct {
 type skelpipeToWrapper struct {
 	plugin *plugin
 
-	pipe     *piperv1beta1.Pipe
-	username string
-	to       *piperv1beta1.ToSpec
+	pipe               *piperv1beta1.Pipe
+	username           string
+	to                 *piperv1beta1.ToSpec
+	hostOverride       string
+	skipKnownHosts     bool
+	privateKeyOverride string
 }
 
 type skelpipeToPasswordWrapper struct {
@@ -82,14 +85,16 @@ func (s *skelpipeToWrapper) User(conn libplugin.ConnMetadata) string {
 }
 
 func (s *skelpipeToWrapper) Host(conn libplugin.ConnMetadata) string {
+	if s.hostOverride != "" {
+		return s.hostOverride
+	}
 	return s.to.Host
 }
 
-func (s *skelpipeToWrapper) IgnoreHostKey(conn libplugin.ConnMetadata) bool {
-	return s.to.IgnoreHostkey
-}
-
 func (s *skelpipeToWrapper) KnownHosts(conn libplugin.ConnMetadata) ([]byte, error) {
+	if s.skipKnownHosts {
+		return nil, nil
+	}
 	return base64.StdEncoding.DecodeString(s.to.KnownHostsData)
 }
 
@@ -117,25 +122,31 @@ func (s *skelpipeFromWrapper) MatchConn(conn libplugin.ConnMetadata) (skel.SkelP
 	}
 
 	if matched {
+		toWrapper := skelpipeToWrapper{
+			plugin:   s.plugin,
+			pipe:     s.pipe,
+			username: targetuser,
+			to:       s.to,
+		}
 
-		if s.to.PrivateKeySecret.Name != "" {
+		if isKubectlExecEnabled(s.pipe) {
+			privateKey, host, err := s.plugin.registerKubectlExecPipe(s.pipe, s.to)
+			if err != nil {
+				return nil, err
+			}
+			toWrapper.privateKeyOverride = privateKey
+			toWrapper.hostOverride = host
+			toWrapper.skipKnownHosts = true
+		}
+
+		if s.to.PrivateKeySecret.Name != "" || toWrapper.privateKeyOverride != "" {
 			return &skelpipeToPrivateKeyWrapper{
-				skelpipeToWrapper: skelpipeToWrapper{
-					plugin:   s.plugin,
-					pipe:     s.pipe,
-					username: targetuser,
-					to:       s.to,
-				},
+				skelpipeToWrapper: toWrapper,
 			}, nil
 		}
 
 		return &skelpipeToPasswordWrapper{
-			skelpipeToWrapper: skelpipeToWrapper{
-				plugin:   s.plugin,
-				pipe:     s.pipe,
-				username: targetuser,
-				to:       s.to,
-			},
+			skelpipeToWrapper: toWrapper,
 		}, nil
 	}
 
@@ -151,7 +162,7 @@ func (s *skelpipePasswordWrapper) TestPassword(conn libplugin.ConnMetadata, pass
 	pwdmatched := len(pwds) == 0
 
 	for _, data := range pwds {
-		log.Debugf("try to match password using htpasswd")
+		slog.Debug("try to match password using htpasswd")
 		auth, err := htpasswd.NewFromReader(bytes.NewReader(data), htpasswd.DefaultSystems, nil)
 		if err != nil {
 			return false, err
@@ -172,7 +183,7 @@ func (s *skelpipePublicKeyWrapper) AuthorizedKeys(conn libplugin.ConnMetadata) (
 	}
 
 	if s.from.AuthorizedKeysSecret.Name != "" {
-		log.Debugf("mapping to %v authorized keys using secret %v", s.pipe.Spec.To.Host, s.from.AuthorizedKeysSecret.Name)
+		slog.Debug("mapping authorized keys from secret", "host", s.pipe.Spec.To.Host, "secret", s.from.AuthorizedKeysSecret.Name)
 		anno := s.pipe.GetAnnotations()
 
 		secret, err := s.plugin.k8sclient.Secrets(s.pipe.Namespace).Get(context.Background(), s.from.AuthorizedKeysSecret.Name, metav1.GetOptions{})
@@ -183,7 +194,7 @@ func (s *skelpipePublicKeyWrapper) AuthorizedKeys(conn libplugin.ConnMetadata) (
 		for _, k := range []string{anno["sshpiper.com/authorizedkeys_field_name"], anno["authorizedkeys_field_name"], "authorized_keys", "authorizedkeys", "ssh-authorizedkeys"} {
 			data := secret.Data[k]
 			if data != nil {
-				log.Debugf("found authorized keys in secret %v/%v", s.from.AuthorizedKeysSecret.Name, k)
+				slog.Debug("found authorized keys in secret", "secret", s.from.AuthorizedKeysSecret.Name, "key", k)
 				byteSlices = append(byteSlices, data)
 				break
 			}
@@ -199,7 +210,15 @@ func (s *skelpipePublicKeyWrapper) TrustedUserCAKeys(conn libplugin.ConnMetadata
 }
 
 func (s *skelpipeToPrivateKeyWrapper) PrivateKey(conn libplugin.ConnMetadata) ([]byte, []byte, error) {
-	log.Debugf("mapping to %v private key using secret %v", s.to.Host, s.to.PrivateKeySecret.Name)
+	if s.privateKeyOverride != "" {
+		privateKey, err := base64.StdEncoding.DecodeString(s.privateKeyOverride)
+		if err != nil {
+			return nil, nil, err
+		}
+		return privateKey, nil, nil
+	}
+
+	slog.Debug("mapping private key from secret", "host", s.to.Host, "secret", s.to.PrivateKeySecret.Name)
 	secret, err := s.plugin.k8sclient.Secrets(s.pipe.Namespace).Get(context.Background(), s.to.PrivateKeySecret.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, err
@@ -212,7 +231,7 @@ func (s *skelpipeToPrivateKeyWrapper) PrivateKey(conn libplugin.ConnMetadata) ([
 	for _, k := range []string{anno["sshpiper.com/privatekey_field_name"], anno["privatekey_field_name"], "ssh-privatekey", "privatekey"} {
 		data := secret.Data[k]
 		if data != nil {
-			log.Debugf("found private key in secret %v/%v", s.to.PrivateKeySecret.Name, k)
+			slog.Debug("found private key in secret", "secret", s.to.PrivateKeySecret.Name, "key", k)
 			privateKey = data
 			break
 		}
@@ -222,7 +241,7 @@ func (s *skelpipeToPrivateKeyWrapper) PrivateKey(conn libplugin.ConnMetadata) ([
 		for _, k := range []string{anno["sshpiper.com/publickey_field_name"], anno["publickey_field_name"], "ssh-publickey-cert", "publickey-cert", "ssh-publickey", "publickey"} {
 			data := secret.Data[k]
 			if data != nil {
-				log.Debugf("found publickey key cert in secret %v/%v", s.to.PrivateKeySecret.Name, k)
+				slog.Debug("found publickey cert in secret", "secret", s.to.PrivateKeySecret.Name, "key", k)
 				publicKey = data
 				break
 			}
@@ -234,7 +253,7 @@ func (s *skelpipeToPrivateKeyWrapper) PrivateKey(conn libplugin.ConnMetadata) ([
 
 func (s *skelpipeToPasswordWrapper) OverridePassword(conn libplugin.ConnMetadata) ([]byte, error) {
 	if s.to.PasswordSecret.Name != "" {
-		log.Debugf("mapping to %v password using secret %v", s.to.Host, s.to.PasswordSecret.Name)
+		slog.Debug("mapping password from secret", "host", s.to.Host, "secret", s.to.PasswordSecret.Name)
 		secret, err := s.plugin.k8sclient.Secrets(s.pipe.Namespace).Get(context.Background(), s.to.PasswordSecret.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
@@ -244,12 +263,12 @@ func (s *skelpipeToPasswordWrapper) OverridePassword(conn libplugin.ConnMetadata
 		for _, k := range []string{anno["password_field_name"], "password"} {
 			data := secret.Data[k]
 			if data != nil {
-				log.Debugf("found password in secret %v/%v", s.to.PasswordSecret.Name, k)
+				slog.Debug("found password in secret", "secret", s.to.PasswordSecret.Name, "key", k)
 				return data, nil
 			}
 		}
 
-		log.Warnf("password field not found in secret %v", s.to.PasswordSecret.Name)
+		slog.Warn("password field not found in secret", "secret", s.to.PasswordSecret.Name)
 	}
 
 	return nil, nil

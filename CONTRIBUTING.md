@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to sshpiper. 
+Thank you for your interest in contributing to sshpiper.
 Make sure you have read [README.md](README.md) before starting.
 
 ## Getting Started
@@ -13,13 +13,19 @@ Make sure you have read [README.md](README.md) before starting.
 
 ### Get the code
 
-rememeber to clone the submodules
-
 ```
 git clone https://github.com/tg123/sshpiper
 cd sshpiper
-git submodule update --init --recursive
 ```
+
+> The forked `golang.org/x/crypto` (carrying sshpiper's `PiperConfig`/`PiperConn` API) lives in a separate repo,
+> [`tg123/sshpiper.crypto`](https://github.com/tg123/sshpiper.crypto), and is pulled in as a regular Go module
+> dependency of `cmd/sshpiperd` via `replace` — no `git submodule` step is needed.
+>
+> If you want to hack on the fork against your local sshpiper checkout, create a (gitignored) `go.work` at the
+> repo root that `use`s both `./cmd/sshpiperd` and your local clone of `sshpiper.crypto`. Do **not** commit
+> `go.work`: workspace mode would apply the daemon's `replace golang.org/x/crypto` graph-wide and leak the
+> fork into root/plugin module builds.
 
 ### Start Develop Environment
 
@@ -42,7 +48,7 @@ more settings: <https://github.com/linuxserver/docker-openssh-server>
 after you have done, attach to testrunner container:
 
 ```
-docker exec -ti e2e_testrunner_1 bash
+docker exec -ti e2e-testrunner-1 bash
 ```
 
 then run test in `/src/e2e`
@@ -57,10 +63,14 @@ go test
 
 ## Understanding how sshpiper works
 
-### sshpiper seasoned cryto ssh lib
+### sshpiper seasoned crypto ssh lib
 
-The `crypto` folder contains the source code of the [sshpiper seasoned cryto ssh lib](./crypto/).
-It based on [crypto/ssh](https://golang.org/pkg/crypto/ssh/) and with a drop-in [sshpiper.go](./crypto/ssh/sshpiper.go) to expose all low level sshpiper required APIs.
+The forked `crypto/ssh` library (with sshpiper-specific extensions like `PiperConfig`/`PiperConn`) lives in a
+separate repository: [`tg123/sshpiper.crypto`](https://github.com/tg123/sshpiper.crypto). It is based on
+[crypto/ssh](https://golang.org/pkg/crypto/ssh/) with a drop-in `sshpiper.go` exposing the low-level APIs
+sshpiper needs. It is consumed only by the `cmd/sshpiperd` Go module (via a `replace` directive pinned to a
+versioned tag of the fork), so plugins and libs in this repo always build against upstream
+`golang.org/x/crypto`.
 
 ### sshpiperd
 
@@ -70,10 +80,10 @@ The plugins are responsible to figure out how to authenticate `downstream` and m
 
 ### plugin
 
-The plugin is typically a grpc server that accepts requrests from `sshpiperd`. 
+The plugin is typically a grpc server that accepts requests from `sshpiperd`.
 The proto defines in [sshpiper.proto](./proto/sshpiper.proto).
 
-In most of the cases, the plugin connects with `sshpiperd` via `stdin/stdout`. The [ioconnn](./libplugin/ioconn/) wraps stdin/stdout to net.Conn for grpc use.
+In most of the cases, the plugin connects with `sshpiperd` via `stdin/stdout`. The [ioconn](./libplugin/ioconn/) wraps stdin/stdout to net.Conn for grpc use.
 `sshpiperd` also supports to create remote grpc connections to a plugin deploy in a different machine.
 
 ## Your first plugin
@@ -96,8 +106,8 @@ Take `fixed` as an example:
 }
 ```
 
-Here means the `downstream` is sending password to `sshpiperd`. Then `sshpiperd` will call plugin's `PasswordCallback` to get the `upstream` to connect to. 
-The `upstream` object contains host port and auth info about how to connect to the `upstream`. you can aslo return an error to deny the connection.
+Here means the `downstream` is sending password to `sshpiperd`. Then `sshpiperd` will call plugin's `PasswordCallback` to get the `upstream` to connect to.
+The `upstream` object contains host port and auth info about how to connect to the `upstream`. you can also return an error to deny the connection.
 
 ### build and run the plugin
 
@@ -112,4 +122,3 @@ you will get the executable in the current directory. say `myplugin`. start it w
 ```
 sshpiperd /path/to/myplugin
 ```
-
