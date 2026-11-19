@@ -809,6 +809,7 @@ end
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "PreferredAuthentications=password",
+			"-o", "NumberOfPasswordPrompts=1",
 			"-p", port,
 			"-l", "known_hosts_user",
 			"127.0.0.1",
