@@ -67,17 +67,29 @@ func (s *skelpipeWrapper) From() []skel.SkelPipeFrom {
 			to:     &s.pipe.Spec.To,
 		}
 
-		if f.AuthorizedKeysData != "" || f.AuthorizedKeysFile != "" || f.AuthorizedKeysSecret.Name != "" {
+		switch {
+		case hasAuthorizedKeys(&f):
 			froms = append(froms, &skelpipePublicKeyWrapper{
 				skelpipeFromWrapper: *w,
 			})
-		} else {
+		case s.plugin.allowPasswordAuth:
 			froms = append(froms, &skelpipePasswordWrapper{
 				skelpipeFromWrapper: *w,
 			})
+		default:
+			// Fail closed: an entry with no keys matches no auth method. Upstream would make
+			// it a password entry, and with no htpasswd that accepts any password.
+			slog.Warn("pipe from entry has no authorized keys, denying every login to it",
+				"pipe", s.pipe.Namespace+"/"+s.pipe.Name, "username", f.Username)
 		}
 	}
 	return froms
+}
+
+// hasAuthorizedKeys reports whether the entry names any source of authorized keys. A source that
+// turns out to be empty (an empty Secret field, an empty file) still verifies no key, so it denies.
+func hasAuthorizedKeys(f *piperv1beta1.FromSpec) bool {
+	return f.AuthorizedKeysData != "" || f.AuthorizedKeysFile != "" || f.AuthorizedKeysSecret.Name != ""
 }
 
 func (s *skelpipeToWrapper) User(conn libplugin.ConnMetadata) string {
@@ -296,6 +308,17 @@ func loadStringAndFile(base64orraw string, filepath string) ([][]byte, error) {
 	}
 
 	return all, nil
+}
+
+// createConfig builds the plugin callbacks. Without allowPasswordAuth the password callback is
+// left unset, so sshpiperd never offers or accepts password auth. The plugin never registers
+// keyboard-interactive or none auth.
+func (p *plugin) createConfig() *libplugin.SshPiperPluginConfig {
+	config := skel.NewSkelPlugin(p.listPipe).CreateConfig()
+	if !p.allowPasswordAuth {
+		config.PasswordCallback = nil
+	}
+	return config
 }
 
 func (p *plugin) listPipe(_ libplugin.ConnMetadata) ([]skel.SkelPipe, error) {
