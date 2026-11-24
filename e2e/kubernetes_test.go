@@ -264,3 +264,124 @@ func TestKubernetes(t *testing.T) {
 		}
 	})
 }
+
+// sshLoginDenied runs ssh against the proxy, answers any password prompt with an arbitrary
+// password, and reports whether the login was refused without running the remote command.
+func sshLoginDenied(t *testing.T, host, port, user string, extra ...string) {
+	t.Helper()
+
+	targetfile := uuid.New().String()
+	args := []string{
+		"-v",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "NumberOfPasswordPrompts=1",
+		"-p", port,
+		"-l", user,
+	}
+	args = append(args, extra...)
+	args = append(args, host, fmt.Sprintf(`sh -c "echo -n pwned > /shared/%v"`, targetfile))
+
+	c, stdin, stdout, err := runCmd("ssh", args...)
+	if err != nil {
+		t.Fatalf("failed to start ssh: %v", err)
+	}
+	defer killCmd(c)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+
+	buf := stdout.(*syncBuffer)
+	answered := false
+	deadline := time.After(time.Minute)
+	for {
+		select {
+		case waitErr := <-done:
+			out := string(buf.Bytes())
+			if waitErr == nil {
+				t.Fatalf("ssh as %q succeeded; expected the login to be denied\n%s", user, out)
+			}
+			if !strings.Contains(out, "Permission denied") {
+				t.Fatalf("ssh as %q failed without an auth denial: %v\n%s", user, waitErr, out)
+			}
+			if _, statErr := os.Stat(path.Join("/shared", targetfile)); statErr == nil {
+				t.Fatalf("remote command ran for %q", user)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("ssh as %q did not finish\n%s", user, string(buf.Bytes()))
+		case <-time.After(200 * time.Millisecond):
+			if !answered && strings.Contains(string(buf.Bytes()), "'s password") {
+				_, _ = fmt.Fprintf(stdin, "any-password\n")
+				answered = true
+			}
+		}
+	}
+}
+
+// TestKubernetesKeylessPipeDenied: through the plugin's default settings, a Pipe whose `from`
+// entry has no keys refuses an arbitrary key and a password (saturn-architecture-docs#118).
+func TestKubernetesKeylessPipeDenied(t *testing.T) {
+	piperhost := "host-k8s-proxy"
+	strictport := "2223"
+	waitForEndpointReadyWithTimeout(piperhost+":"+strictport, time.Minute*5)
+
+	keyfiledir, err := os.MkdirTemp("", "")
+	if err != nil {
+		t.Fatalf("failed to create temp key dir: %v", err)
+	}
+	// A key other Pipes do accept, so the denial is about this Pipe and not an unknown key.
+	knownkey := path.Join(keyfiledir, "known")
+	if err := os.WriteFile(knownkey, []byte(testprivatekey), 0o400); err != nil {
+		t.Fatalf("failed to write test key: %v", err)
+	}
+	randomkey := path.Join(keyfiledir, "random")
+	if err := runCmdAndWait("ssh-keygen", "-N", "", "-f", randomkey); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	t.Run("arbitrary_key", func(t *testing.T) {
+		sshLoginDenied(t, piperhost, strictport, "atlaskeyless",
+			"-o", "PreferredAuthentications=publickey", "-i", randomkey)
+	})
+	t.Run("key_accepted_by_other_pipes", func(t *testing.T) {
+		sshLoginDenied(t, piperhost, strictport, "atlaskeyless",
+			"-o", "PreferredAuthentications=publickey", "-i", knownkey)
+	})
+	t.Run("password", func(t *testing.T) {
+		sshLoginDenied(t, piperhost, strictport, "atlaskeyless",
+			"-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no")
+	})
+	t.Run("any_method", func(t *testing.T) {
+		sshLoginDenied(t, piperhost, strictport, "atlaskeyless", "-i", randomkey)
+	})
+	t.Run("control_password_allowed_lets_anyone_in", func(t *testing.T) {
+		// The same Pipe through the proxy that allows password auth (the upstream default):
+		// any password gets a shell. This is the hole the default closes.
+		randtext := uuid.New().String()
+		targetfile := uuid.New().String()
+		c, stdin, stdout, err := runCmd(
+			"ssh", "-v",
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "PreferredAuthentications=password",
+			"-p", "2222",
+			"-l", "atlaskeyless",
+			piperhost,
+			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfile),
+		)
+		if err != nil {
+			t.Fatalf("failed to start ssh: %v", err)
+		}
+		defer killCmd(c)
+		enterPassword(stdin, stdout, "any-password")
+		time.Sleep(time.Second) // wait for file flush
+		checkSharedFileContent(t, targetfile, randtext)
+	})
+	t.Run("password_passthrough_pipe", func(t *testing.T) {
+		// pipe-password has no keys and forwards the password upstream; with password auth
+		// off it is denied too.
+		sshLoginDenied(t, piperhost, strictport, "pass",
+			"-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no")
+	})
+}
