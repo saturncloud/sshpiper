@@ -22,6 +22,12 @@ type plugin struct {
 	stop      chan<- struct{}
 	kubeCfg   *rest.Config
 
+	// Saturn: when false (the default), a Pipe `from` entry with no authorized keys denies
+	// every login instead of falling back to password auth, and password auth is not offered
+	// at all. Upstream treats an entry with no keys and no htpasswd as "accept any password",
+	// which let anyone in to a Pipe that Atlas wrote without keys (saturn-architecture-docs#118).
+	allowPasswordAuth bool
+
 	kubeExecMu          sync.Mutex
 	kubeExecBridgeAddr  string
 	kubeExecPipeToKey   map[string]string
