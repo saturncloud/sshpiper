@@ -378,6 +378,29 @@ func TestKubernetesKeylessPipeDenied(t *testing.T) {
 		time.Sleep(time.Second) // wait for file flush
 		checkSharedFileContent(t, targetfile, randtext)
 	})
+	t.Run("check_keyed_pipe_still_works_through_strict", func(t *testing.T) {
+		// Independent check (#118): with password auth off, a Pipe with keys still lets its
+		// key in end to end (the Atlas shape: inline authorized_keys_data, private key upstream).
+		randtext := uuid.New().String()
+		targetfile := uuid.New().String()
+		c, _, _, err := runCmd(
+			"ssh", "-v",
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "BatchMode=yes",
+			"-p", strictport,
+			"-l", "anyuser",
+			"-i", knownkey,
+			piperhost,
+			fmt.Sprintf(`sh -c "echo -n %v > /shared/%v"`, randtext, targetfile),
+		)
+		if err != nil {
+			t.Fatalf("failed to start ssh: %v", err)
+		}
+		defer killCmd(c)
+		time.Sleep(2 * time.Second) // wait for file flush
+		checkSharedFileContent(t, targetfile, randtext)
+	})
 	t.Run("password_passthrough_pipe", func(t *testing.T) {
 		// pipe-password has no keys and forwards the password upstream; with password auth
 		// off it is denied too.
