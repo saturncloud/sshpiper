@@ -166,17 +166,27 @@ func killCmd(c *exec.Cmd) {
 	}
 }
 
+// runAndGetStdout returns the command's stdout alone. Callers parse it (for
+// example ssh-keyscan output used as known_hosts data), so it runs without
+// the pty and stdbuf wrapper of runCmd: a pty merges stderr into the output
+// (a loader warning then becomes an unparsable known_hosts line), and the
+// tee goroutine may not have copied everything when the command exits.
 func runAndGetStdout(cmd string, args ...string) ([]byte, error) {
-	c, _, stdout, err := runCmd(cmd, args...)
+	// No SysProcAttr: pty.Start in runCmd sets Setsid/Setctty on the shared
+	// sigtermForPdeathsig value, and Setctty without a pty fails the exec.
+	// These commands are short-lived (ssh-keyscan has its own timeout).
+	c := exec.Command(cmd, args...)
+	c.Stderr = os.Stderr
+
+	log.Printf("starting %v", c.Args)
+
+	out, err := c.Output()
+	_, _ = os.Stdout.Write(out)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := c.Wait(); err != nil {
-		return nil, err
-	}
-
-	return io.ReadAll(stdout)
+	return out, nil
 }
 
 func nextAvailablePort() int {

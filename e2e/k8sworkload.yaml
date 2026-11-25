@@ -46,6 +46,10 @@ spec:
         env:
         - name: PLUGIN
           value: "kubernetes"
+        # Saturn: the upstream password cases below need password auth, which the plugin
+        # now turns off by default. sshpiper-strict-deployment runs the default.
+        - name: SSHPIPERD_KUBERNETES_ALLOW_PASSWORD_AUTH
+          value: "true"
         - name: SSHPIPERD_SERVER_KEY
           value: "/serverkey/ssh_host_ed25519_key"
         - name: SSHPIPERD_LOG_LEVEL
@@ -67,6 +71,61 @@ spec:
       - name: sshpiper-files
         configMap:
           name: sshpiper-files
+---
+# Saturn: the same plugin with its default settings (password auth off), as charts/ssh-proxy
+# runs it. kubernetes_test.go checks that a keyless Pipe denies every login through it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sshpiper-strict
+spec:
+  selector:
+    app: sshpiper-strict
+  ports:
+    - protocol: TCP
+      port: 2222
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sshpiper-strict-deployment
+  labels:
+    app: sshpiper-strict
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sshpiper-strict
+  template:
+    metadata:
+      labels:
+        app: sshpiper-strict
+    spec:
+      serviceAccountName: sshpiper-account
+      containers:
+      - name: sshpiper
+        imagePullPolicy: Never
+        image: sshpiper-test-image
+        ports:
+        - containerPort: 2222
+        env:
+        - name: PLUGIN
+          value: "kubernetes"
+        - name: SSHPIPERD_SERVER_KEY
+          value: "/serverkey/ssh_host_ed25519_key"
+        - name: SSHPIPERD_LOG_LEVEL
+          value: "debug"
+        volumeMounts:
+        - name: sshpiper-server-key
+          mountPath: "/serverkey/"
+          readOnly: true
+      volumes:
+      - name: sshpiper-server-key
+        secret:
+          secretName: sshpiper-server-key
+          items:
+          - key: server_key
+            path: ssh_host_ed25519_key
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -124,6 +183,22 @@ spec:
     - sh
     - -c
     - sleep infinity
+
+# Saturn: the Pipe Atlas wrote for a resource with no SSH keys (saturn-architecture-docs#118):
+# no authorized keys, upstream login by private key. Every login to it must be denied.
+---
+apiVersion: sshpiper.com/v1beta1
+kind: Pipe
+metadata:
+  name: pipe-atlas-keyless
+spec:
+  from:
+  - username: "atlaskeyless"
+  to:
+    host: host-publickey:2222
+    username: "user"
+    private_key_secret:
+      name: host-publickey-key
 
 # pipe to a password based sshd
 ---

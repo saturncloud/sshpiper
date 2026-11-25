@@ -2,7 +2,6 @@ package main
 
 import (
 	"github.com/tg123/sshpiper/libplugin"
-	"github.com/tg123/sshpiper/libplugin/skel"
 	"github.com/urfave/cli/v2"
 )
 
@@ -17,6 +16,13 @@ func main() {
 				EnvVars:  []string{"SSHPIPERD_KUBERNETES_ALL_NAMESPACES"},
 				Required: false,
 			},
+			&cli.BoolFlag{
+				Name: "allow-password-auth",
+				Usage: "Saturn: offer password login for Pipe `from` entries that have no authorized keys. " +
+					"Off by default: such an entry then denies every login, and the plugin offers only publickey.",
+				EnvVars:  []string{"SSHPIPERD_KUBERNETES_ALLOW_PASSWORD_AUTH"},
+				Required: false,
+			},
 			&cli.StringFlag{
 				Name:     "kubeconfig",
 				Usage:    "Path to kubeconfig file",
@@ -29,8 +35,8 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			skel := skel.NewSkelPlugin(plugin.listPipe)
-			return skel.CreateConfig(), nil
+			plugin.allowPasswordAuth = c.Bool("allow-password-auth")
+			return plugin.createConfig(), nil
 		},
 	})
 }
