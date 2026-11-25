@@ -103,6 +103,7 @@ services:
         kubectl apply -f /kubernetes/workload.yaml
         kubectl wait deployment --all --for condition=Available=True
         kubectl port-forward service/sshpiper --pod-running-timeout=2m --address 0.0.0.0 2222:2222 &
+        kubectl port-forward service/sshpiper-strict --pod-running-timeout=2m --address 0.0.0.0 2223:2222 &
         kubectl logs -f deployment/sshpiper-deployment
     privileged: true
     depends_on:
